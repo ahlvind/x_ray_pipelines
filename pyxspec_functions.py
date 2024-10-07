@@ -49,8 +49,7 @@ def find_closest_indices(array, target_value):
     
     # also save the nearest upper bound that is still positive
     new_upper_index = index_up+1
-    print('index, övre nya flux gräns',new_upper_index, array[new_upper_index])
-    
+
     k = min_index
     # finds the lower bound
     # –––––––––––––––––––––
@@ -78,68 +77,242 @@ def find_closest_indices(array, target_value):
         
         new_lower_index = index_up-5
     
-    
-    print(f'Target value: {target_value}')
-    print(f'Original lower bound index: {index_low}, New lower bound index: {new_lower_index}, Value: {array[new_lower_index]}')
-    print(f'Original upper bound index: {index_up}, New upper bound index: {new_upper_index}, Value: {array[new_upper_index]}')
-    
     return min_index, index_up, index_low, new_lower_index, new_upper_index
 
+def steppar_func(step_start, step_end, steps, paramNr, max_call_limit, force_upper_limit):
+    """
+    Execute the `Fit.steppar` function with the specified input parameters and handle any errors.
 
+    This function performs a parameter step search using `pyxspec`'s `Fit.steppar` for a given parameter,
+    and returns the results as arrays. It limits the number of calls to prevent excessive iteration and
+    handles errors that may occur during the step operation.
 
+    Parameters
+    ----------
+    step_start : float
+        The starting value for the steppar search.
+    step_end : float
+        The ending value for the steppar search.
+    steps : int
+        The number of steps between `step_start` and `step_end`.
+    paramNr : int
+        The parameter number to be stepped.
+    max_call_limit : int
+        Maximum number of function calls allowed to avoid excessive iterations.
+    force_upper_limit : bool
+        A flag indicating whether to force the upper limit during the steppar operation.
+        
+    Returns
+    -------
+    cflux_array : numpy.ndarray or None
+        Array of `cflux` values from the `Fit.stepparResults` if successful; otherwise `None`.
+    delcstat_array : numpy.ndarray or None
+        Array of `delstat` values from the `Fit.stepparResults` if successful; otherwise `None`.
+        
+    Raises
+    ------
+    ValueError
+        If `max_call_limit` is less than or equal to 0, indicating that the maximum number of calls has been reached.
 
-def steppar_func(step_start, step_end, tolerance, cstat, steps, paramNr, max_call_limit):
-    ## TODO: ***XSPEC Error:  No variable parameters for fit ***Warning: Error search cannot find bracket around delta fit-stat, will automatically exit from trials loop. parameter upper  bound is INVALID.
-    ## TODO: xspec exit loop without try, error/warning not cauth in except
-    #https://heasarc.gsfc.nasa.gov/xanadu/xspec/python/html/extended.html
-    """ A complete function that makes steppar for a given parameter number  """
-    
-    # Max number of itterations of steppar. This narrows down the interval of the steppar limits
-    if max_call_limit<=0:
+    Notes
+    -----
+    The function logs the number of iterations using `max_call_limit` and limits it to avoid excessive recursive calls.
+    It returns `None` for both arrays if an error occurs in the `Fit.steppar` call.
+
+    Examples
+    --------
+    >>> cflux, delstat = steppar_func(0.1, 10.0, 50, 2, 20, False)
+    >>> if cflux is not None:
+    ...     print(f"Cflux array: {cflux}")
+    ... else:
+    ...     print("Steppar operation failed.")
+    """
+    print(f'itteration nr: {max_call_limit}')
+    if max_call_limit <= 0:
         raise ValueError(f"Exceeded the maximum number of function calls ({max_call_limit}).")
-        return None
-
+    
     try:
-        Fit.steppar(f"{paramNr} {step_start} {step_end} {steps}")  # steppar through cflux
+        Fit.steppar(f"{paramNr} {step_start} {step_end} {steps}")
     except Exception as e:
         print(f"Error in Fit.steppar: {e}")
-        
-    power = Fit.stepparResults(paramNr)  # log flux output array
-    power = np.array(power)
-    delcstat = Fit.stepparResults('delstat') # delcstat output array
-    delcstat = np.array(delcstat)
-  
+        return None, None
 
-    min_index, index_up, index_low, new_lower_index, new_upper_index = find_closest_indices(delcstat,cstat)  # index of array where best fit value
-    best_power = power[min_index] # best fit value of cflux
-    upper_power = power[index_up]
-
-    if index_low==0:
-        lower_power = 0
-    else:
-        lower_power = power[index_low]
+    cflux_array = np.array(Fit.stepparResults(paramNr))
+    delcstat_array = np.array(Fit.stepparResults('delstat'))
     
-    step_start, step_end = power[new_lower_index], power[new_upper_index]
-    
-    # check tolerance if it is close enough to cstat
-    if abs(delcstat[index_up]-cstat)>tolerance:
-        print('här igen')
-        # Do steppar again
-        return steppar_func(step_start, step_end, tolerance, cstat, 100, paramNr, max_call_limit-1)
-        
-    else:
-        if lower_power==0:
-            best_power = upper_power
-        # Return the requested values
-        return best_power, lower_power, upper_power
+    return cflux_array, delcstat_array
 
-def call_steppar(cstat,paramNr, step_start=-18, step_end=-8, **kwargs):
-    """ Collecting function of steppar for an easier call of steppar """
-    print('step_start_is',step_start)
+
+
+def find_indices_for_steppar(cflux_array, delcstat_array, tolerance, target, steps, paramNr, max_call_limit, force_upper_limit=False):
+    """
+    Determine the best flux, (lower if exists) and upper flux limits that correspond to a given target Δcstat value using `Fit.steppar()` results.
+
+    This function identifies the index positions within the `cflux_array` and `delcstat_array` that correspond to a specified target value for Δcstat, within a given tolerance. If the lower or upper limit is not found within the current data range, the function recursively zooms in on the region around the best Δcstat value, performing additional `Fit.steppar()` operations.
+
+    Parameters
+    ----------
+    cflux_array : numpy.ndarray
+        Array of flux values corresponding to a given parameter from the `steppar` search.
+    delcstat_array : numpy.ndarray
+        Array of Δcstat values corresponding to each Δcstatistics value.
+    tolerance : float
+        The acceptable tolerance of |Δcstat-target|<tolerance.
+    target : float
+        The target Δcstat value to find within the `delcstat_array`.
+    steps : int
+        Number of steps to use in each `steppar` operation.
+    paramNr : int
+        Which model parameter is used for the `Fit.steppar` function call.
+    max_call_limit : int
+        Maximum number of recursive calls of the whole steppar funciton allowed to prevent excessive iterations.
+    force_upper_limit : bool, optional
+        A flag indicating whether to ignore the search for a lower limit if it does not exist (default is `False`). This parameter becomes important for when searching upper values in steppar called a second time when array has zoomed in on upper limit region.
+
+    Returns
+    -------
+    cflux : float
+        The best-fit flux value corresponding to the minimum Δcstat value.
+    lower_cflux : float
+        The flux value corresponding to the lower limit for the target Δcstat value, or 0 if not found.
+    upper_cflux : float
+        The flux value corresponding to the upper limit for the target Δcstat value.
+
+    Raises
+    ------
+    ValueError
+        If `max_call_limit` is less than or equal to 0, indicating the maximum number of recursive calls has been reached.
+    TypeError
+        If either `cflux_array` or `delcstat_array` is not a NumPy array.
+
+    Notes
+    -----
+    - If the best-fit index is at position 0 or if the lower limit does not exist (based on `force_upper_limit`),
+      the function only searches for the upper limit.
+    - If the tolerance condition is not met, the function recursively refines the search region until the target value is found or the `max_call_limit` is reached.
+    - The `steppar_func` is called to perform additional `Fit.steppar` operations in the refined range during recursion.
+
+    Examples
+    --------
+    >>> cflux_array = np.array([0.1, 0.5, 1.0, 1.5, 2.0])
+    >>> delcstat_array = np.array([12.0, 10.5, 8.0, 9.5, 11.0])
+    >>> cflux, lower, upper = find_indices_for_steppar(cflux_array, delcstat_array, tolerance=0.1, target=9.0, steps=5, paramNr=2, max_call_limit=10)
+    >>> print(f"Best-fit flux: {cflux}, Lower limit: {lower}, Upper limit: {upper}")
+    Best-fit flux: 1.0, Lower limit: 0, Upper limit: 1.5
+    """
+    
+    print('Δcstat target value: ', target)
+    best_index = np.where(delcstat_array == np.min(delcstat_array))[0][0]  # Find the index of min Δcstat
+    print(f'Forced upper limit: {force_upper_limit}')
+    
+    if best_index == 0 or delcstat_array[0]<target or force_upper_limit:
+        print('The lower limit does not exist, searching for only upper limit.')
+        
+        if target==9.0:
+            print('Exiting function, no search for only upper value of 9.0!')
+            return 1, 1, 1
+            
+        # Only search for the upper limit
+        index_up = best_index + min(range(len(delcstat_array[best_index:])),
+                                    key=lambda i: abs(delcstat_array[best_index + i] - target))
+        print('tolerance check:',abs(delcstat_array[index_up] - target))
+        if abs(delcstat_array[index_up] - target) <= tolerance:
+            upper_cflux = cflux_array[index_up]
+            print('|Δcstat-target|< tolerance')
+            return upper_cflux, 0, upper_cflux  # No lower limit
+        else:
+            print('|Δcstat-target|> tolerance')
+            # Recursive call if tolerance not met. Zoom in on the region around max to find only upper limit
+            new_step_end = cflux_array[min(index_up + 3, len(cflux_array) - 1)]
+            new_step_start = cflux_array[min(index_up -3, len(cflux_array) - 1)]
+            cflux_array, delcstat_array = steppar_func(new_step_start, new_step_end, steps, paramNr, max_call_limit - 1, force_upper_limit=True)
+            return find_indices_for_steppar(cflux_array, delcstat_array, tolerance, target, steps, paramNr, max_call_limit-1, force_upper_limit=True)
+
+    else:
+        # Find the best flux
+        cflux = cflux_array[best_index]
+
+        # Find the upper limit
+        index_up = best_index + min(range(len(delcstat_array[best_index:])),
+                                    key=lambda i: abs(delcstat_array[best_index + i] - target))
+        
+        if abs(delcstat_array[index_up] - target) <= tolerance:
+            upper_cflux = cflux_array[index_up]
+        else:
+            new_step_start = cflux_array[best_index]
+            new_step_end = cflux_array[min(index_up + 3, len(cflux_array) - 1)]
+            return steppar_func(new_step_start, new_step_end, steps, paramNr, max_call_limit - 1)
+
+        # Find the lower limit
+        index_low = min(range(best_index), key=lambda i: abs(delcstat_array[i] - target))
+        
+        if index_low == 0:  # No lower limit
+            return upper_cflux, 0, upper_cflux
+
+        if abs(delcstat_array[index_low] - target) <= tolerance:
+            lower_cflux = cflux_array[index_low]
+            return cflux, lower_cflux, upper_cflux
+        
+        # Recursive call if tolerance not met for lower limit
+        return steppar_func(cflux_array[best_index], cflux_array[index_up + 3], steps, paramNr, max_call_limit - 1)
+
+
+
+
+
+def call_steppar(cstat, paramNr, step_start, step_end, **kwargs):
+    """
+    Call the `steppar_func` to perform a parameter step search and find the flux values corresponding to a target Δcstat.
+    This function performs a `steppar` search for a given parameter over a specified range and identifies the best-fit flux, as well as the flux values corresponding to the lower and upper limits of a target Δcstat value. It uses the `steppar_func` to get the initial results and `find_indices_for_steppar` to analyze the results and refine the search if necessary.
+
+    Parameters
+    ----------
+    cstat : float
+        The target Δcstat value for which the flux limits should be found.
+    paramNr : int
+        The parameter number to be used in the `steppar` function.
+    step_start : float
+        The starting value for the parameter in the step search.
+    step_end : float
+        The ending value for the parameter in the step search.
+    **kwargs : dict, optional
+        Additional keyword arguments to be passed to other functions, if necessary.
+
+    Returns
+    -------
+    cflux : float
+        The best-fit flux value corresponding to the minimum Δcstat value.
+    cflux_under : float
+        The flux value corresponding to the lower limit for the target Δcstat value.
+    cflux_over : float
+        The flux value corresponding to the upper limit for the target Δcstat value.
+
+    Notes
+    -----
+    - The function uses a fixed tolerance value of `0.1` and a default number of steps (`100`) for the initial `steppar` search.
+    - The `steppar_func` is called with the maximum number of allowed iterations set to `20` to avoid excessive calls.
+    - This function is only called once, further refinements in steppar procedure is incorporated in functions called by this funciton.
+
+    Examples
+    --------
+    >>> cstat = 9.0
+    >>> paramNr = 2
+    >>> step_start = 0.1
+    >>> step_end = 10.0
+    >>> cflux, lower_limit, upper_limit = call_steppar(cstat, paramNr, step_start, step_end)
+    >>> print(f"Best-fit flux: {cflux}, Lower limit: {lower_limit}, Upper limit: {upper_limit}")
+    Best-fit flux: 1.0, Lower limit: 0.5, Upper limit: 2.0
+    """
+    
     tolerance = 0.1
     steps = 100
-    cflux, cflux_under, cflux_over = steppar_func(step_start, step_end, tolerance, cstat, steps,paramNr,max_call_limit=20)
+    cflux_array, delcstat_array = steppar_func(step_start, step_end, steps, paramNr, 20, False)
+    print(cflux_array, delcstat_array)
+    cflux, cflux_under, cflux_over = find_indices_for_steppar(cflux_array, delcstat_array, tolerance, cstat, steps, paramNr, 20)
     return cflux, cflux_under, cflux_over
+
+
+    
 def PL(E,Norm,Gamma):
     """ Mannually calculate flux component over powerlaw component """
     return Norm*E**(-Gamma)
@@ -177,7 +350,8 @@ def galax_func(name,obsid,telescope):
     
 def tbvarabs_funk(name,obsid,type,epoch):
     """ Function to extract values for tbvarabs from txt files """
-    with open(f"/Users/juliaahlvind/Documents/projekt_1/tbvarabs/scaled_values/tbvarabs_{name}_{obsid}_{type}_{epoch}d.txt") as f:
+    #with open(f"/Users/juliaahlvind/Documents/projekt_1/tbvarabs/scaled_values/tbvarabs_{name}_{obsid}_{type}_{epoch}d.txt") as f:
+    with open(f"/Users/juliaahlvind/Documents/projekt_1/tbvarabs/scaled_values/tbvarabs_{name}_{type}_{epoch}d_G{obsid}.txt") as f:
         contents = f.readlines()
         #mean = contents[2:43]
     ten_percentile = contents[44:85]
